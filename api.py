@@ -114,6 +114,7 @@ def download_media(query, save_path, media_type, quality):
                 'preferredcodec': 'mp3',
                 'preferredquality': preferredquality,
             }],
+            'cookiesfrombrowser': ('chrome',),
         }
     else:
         # video
@@ -130,6 +131,7 @@ def download_media(query, save_path, media_type, quality):
             'outtmpl': os.path.join(save_path, '%(title)s.%(ext)s'),
             'default_search': 'ytsearch1',
             'merge_output_format': 'mp4',
+            'cookiesfrombrowser': ('chrome',),
         }
 
     with yt_dlp.YoutubeDL(options) as ydl:

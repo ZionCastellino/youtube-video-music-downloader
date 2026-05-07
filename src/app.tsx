@@ -55,7 +55,7 @@ function App() {
       }
     } catch (err: any) {
       console.error(err);
-      showToast('error', `Backend not reachable: ${err.message}`);
+      showToast('error', `Cannot open folder picker. Is the local Python backend running?`);
     }
   };
 
@@ -100,7 +100,7 @@ function App() {
         }
       }
     } catch (error) {
-      showToast('error', 'Failed to connect to server. Please try again.');
+      showToast('error', 'Failed to connect. Is the local Python backend running?');
     } finally {
       setIsLoading(false);
     }
