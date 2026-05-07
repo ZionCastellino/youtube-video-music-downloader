@@ -1,10 +1,12 @@
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, Request, Response, BackgroundTasks
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import yt_dlp
 import os
 import requests
+import tempfile
+import shutil
 
 app = FastAPI()
 
@@ -17,7 +19,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from fastapi import Request, Response
 @app.middleware("http")
 async def add_pna_headers(request: Request, call_next):
     if request.method == "OPTIONS":
@@ -33,84 +34,31 @@ async def add_pna_headers(request: Request, call_next):
 
 @app.get("/")
 def root():
-    # If someone opens the FastAPI server root, take them to the download UI.
-    return RedirectResponse(url="/download")
+    return RedirectResponse(url="/api/download")
 
-@app.get("/home")
-def home_alias():
-    # Keep backward compatibility if the frontend hits `/home`.
-    return RedirectResponse(url="/download")
-
-@app.get("/download")
+@app.get("/api/download")
 def download_page():
-    # Simple HTML UI that calls the existing POST /download endpoint.
+    # Fallback UI for Vercel backend
     html = """
 <!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Music Downloader</title>
-  </head>
-  <body style="font-family: Arial, sans-serif; max-width: 900px; margin: 24px auto;">
-    <h2>Music Downloader</h2>
-    <p>Send a link to download audio. This page calls <code>POST /download</code>.</p>
-
-    <form id="downloadForm" style="display: grid; gap: 12px; max-width: 700px;">
-      <label>
-        Query (YouTube/Spotify link or search query)
-        <input name="query" type="text" style="width: 100%; padding: 8px;" required />
-      </label>
-      <label>
-        Save path (must exist)
-        <input name="save_path" type="text" style="width: 100%; padding: 8px;" required />
-      </label>
-      <button type="submit" style="padding: 10px 14px;">Download</button>
-    </form>
-
-    <pre id="out" style="margin-top: 16px; background: #f5f5f5; padding: 12px; white-space: pre-wrap;"></pre>
-
-    <script>
-      const form = document.getElementById('downloadForm');
-      const out = document.getElementById('out');
-
-      form.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        out.textContent = 'Submitting...';
-
-        const payload = {
-          query: form.query.value,
-          save_path: form.save_path.value
-        };
-
-        try {
-          const res = await fetch('/download', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
-          const data = await res.json();
-          out.textContent = JSON.stringify(data, null, 2);
-        } catch (err) {
-          out.textContent = String(err);
-        }
-      });
-    </script>
-  </body>
+<html>
+<head><title>API Backend</title></head>
+<body style="font-family:sans-serif; padding:40px;">
+  <h1>Backend is Running</h1>
+  <p>This is the API server. Use the React frontend to interact with it.</p>
+</body>
 </html>
     """.strip()
-
     return HTMLResponse(html)
 
-class Request(BaseModel):
+class DownloadRequest(BaseModel):
     query: str
     save_path: str = ""
     media_type: str = "audio"
     quality: str = "high"
 
-
+def download_media(query, save_path, media_type, quality):
     # Check if ffmpeg is available
-    import shutil
     has_ffmpeg = shutil.which("ffmpeg") is not None
 
     if media_type == "audio":
@@ -136,7 +84,6 @@ class Request(BaseModel):
             elif quality == "480p":
                 format_str = 'bestvideo[height<=480]+bestaudio/best'
         else:
-            # Without ffmpeg, we must download a single file format (usually max 720p)
             format_str = 'best[ext=mp4]/best'
 
         options = {
@@ -147,13 +94,12 @@ class Request(BaseModel):
         if has_ffmpeg:
             options['merge_output_format'] = 'mp4'
 
-    # Try to use local cookies if available (local mode)
+    # Use cookies from browser if local
     if not os.environ.get("VERCEL"):
         options['cookiesfrombrowser'] = ('chrome',)
 
     with yt_dlp.YoutubeDL(options) as ydl:
         ydl.download([query])
-
 
 def spotify_to_query(link):
     try:
@@ -161,7 +107,6 @@ def spotify_to_query(link):
         title = html.split("<title>")[1].split("</title>")[0]
         title = title.replace(" - song and lyrics by ", " ")
         title = title.replace(" | Spotify", "")
-        # Do not append ' official audio' because obscure songs might return 0 search results
         return title.strip()
     except:
         return link
@@ -169,7 +114,7 @@ def spotify_to_query(link):
 @app.get("/api/pick-folder")
 def pick_folder():
     if os.environ.get("VERCEL"):
-        return JSONResponse(status_code=400, content={"error": "Folder picker is only available when running the backend locally. Please type a path manually."})
+        return JSONResponse(status_code=400, content={"error": "Folder picker only available locally."})
     
     import subprocess
     import sys
@@ -179,22 +124,19 @@ from tkinter import filedialog
 import sys
 root = tk.Tk()
 root.withdraw()
-root.attributes("-topmost", True) # Force window to the front
+root.attributes("-topmost", True)
 path = filedialog.askdirectory(title="Select Download Folder")
 root.destroy()
 sys.stdout.write(path)
 """
     try:
-        # Spawning directly using sys.executable protects us from Tkinter crashing Uvicorn's worker threads!
         result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
-        folder_path = result.stdout.strip()
-        return {"folder": folder_path}
+        return {"folder": result.stdout.strip()}
     except Exception as e:
-        from fastapi.responses import JSONResponse
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.post("/api/download")
-def download(data: Request, background_tasks: BackgroundTasks):
+def download(data: DownloadRequest, background_tasks: BackgroundTasks):
     user_input = data.query
     
     if "spotify.com" in user_input:
@@ -204,14 +146,13 @@ def download(data: Request, background_tasks: BackgroundTasks):
     else:
         query = f"ytsearch1:{user_input}"
 
-    # Determine if we are streaming (Vercel) or saving (Local)
     is_cloud = os.environ.get("VERCEL") or not data.save_path
     
     if is_cloud:
         temp_dir = tempfile.mkdtemp()
         try:
             download_media(query, temp_dir, data.media_type, data.quality)
-            downloaded_files = os.listdir(temp_dir)
+            downloaded_files = [f for f in os.listdir(temp_dir) if os.path.isfile(os.path.join(temp_dir, f))]
             if not downloaded_files:
                 raise Exception("No file was downloaded.")
             file_path = os.path.join(temp_dir, downloaded_files[0])
@@ -224,17 +165,13 @@ def download(data: Request, background_tasks: BackgroundTasks):
             shutil.rmtree(temp_dir, ignore_errors=True)
             return JSONResponse(status_code=500, content={"error": str(e)})
     else:
-        # Local saving mode
         save_path = os.path.expanduser(data.save_path)
         if save_path.lower() == "downloads":
             save_path = os.path.join(os.path.expanduser("~"), "Downloads")
         save_path = os.path.abspath(save_path)
 
         if not os.path.exists(save_path):
-            try:
-                os.makedirs(save_path, exist_ok=True)
-            except Exception:
-                return JSONResponse(status_code=400, content={"error": f"Invalid folder path: cannot create '{save_path}'"})
+            os.makedirs(save_path, exist_ok=True)
 
         try:
             download_media(query, save_path, data.media_type, data.quality)
