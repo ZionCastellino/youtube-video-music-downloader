@@ -104,49 +104,52 @@ def download_page():
 
 class Request(BaseModel):
     query: str
-    save_path: str
+    save_path: str = ""
     media_type: str = "audio"
     quality: str = "high"
 
 
-def download_media(query, save_path, media_type, quality):
+    # Check if ffmpeg is available
+    import shutil
+    has_ffmpeg = shutil.which("ffmpeg") is not None
+
     if media_type == "audio":
-        preferredquality = "320"
-        if quality == "high":
-            preferredquality = "320"
-        elif quality == "medium":
-            preferredquality = "192"
-        elif quality == "low":
-            preferredquality = "128"
-            
         options = {
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(save_path, '%(title)s.%(ext)s'),
             'default_search': 'ytsearch1',
-            'postprocessors': [{
+        }
+        if has_ffmpeg:
+            options['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': preferredquality,
-            }],
-            'cookiesfrombrowser': ('chrome',),
-        }
+                'preferredquality': "320" if quality == "high" else ("192" if quality == "medium" else "128"),
+            }]
     else:
         # video
-        format_str = 'bestvideo+bestaudio/best'
-        if quality == "1080p":
-            format_str = 'bestvideo[height<=1080]+bestaudio/best'
-        elif quality == "720p":
-            format_str = 'bestvideo[height<=720]+bestaudio/best'
-        elif quality == "480p":
-            format_str = 'bestvideo[height<=480]+bestaudio/best'
-            
+        if has_ffmpeg:
+            format_str = 'bestvideo+bestaudio/best'
+            if quality == "1080p":
+                format_str = 'bestvideo[height<=1080]+bestaudio/best'
+            elif quality == "720p":
+                format_str = 'bestvideo[height<=720]+bestaudio/best'
+            elif quality == "480p":
+                format_str = 'bestvideo[height<=480]+bestaudio/best'
+        else:
+            # Without ffmpeg, we must download a single file format (usually max 720p)
+            format_str = 'best[ext=mp4]/best'
+
         options = {
             'format': format_str,
             'outtmpl': os.path.join(save_path, '%(title)s.%(ext)s'),
             'default_search': 'ytsearch1',
-            'merge_output_format': 'mp4',
-            'cookiesfrombrowser': ('chrome',),
         }
+        if has_ffmpeg:
+            options['merge_output_format'] = 'mp4'
+
+    # Try to use local cookies if available (local mode)
+    if not os.environ.get("VERCEL"):
+        options['cookiesfrombrowser'] = ('chrome',)
 
     with yt_dlp.YoutubeDL(options) as ydl:
         ydl.download([query])
@@ -163,8 +166,11 @@ def spotify_to_query(link):
     except:
         return link
 
-@app.get("/pick-folder")
+@app.get("/api/pick-folder")
 def pick_folder():
+    if os.environ.get("VERCEL"):
+        return JSONResponse(status_code=400, content={"error": "Folder picker is only available when running the backend locally. Please type a path manually."})
+    
     import subprocess
     import sys
     script = """
@@ -187,18 +193,10 @@ sys.stdout.write(path)
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-@app.post("/download")
-def download(data: Request):
+@app.post("/api/download")
+def download(data: Request, background_tasks: BackgroundTasks):
     user_input = data.query
     
-    # Expand ~ to the user's home directory if they use it
-    save_path = os.path.expanduser(data.save_path)
-    # If they just wrote "Downloads", let's default to the actual Windows Downloads folder
-    if save_path.lower() == "downloads":
-        save_path = os.path.join(os.path.expanduser("~"), "Downloads")
-    # Resolve to absolute path so it doesn't just save locally if they type a relative path
-    save_path = os.path.abspath(save_path)
-
     if "spotify.com" in user_input:
         query = f"ytsearch1:{spotify_to_query(user_input)}"
     elif "youtube.com" in user_input or "youtu.be" in user_input:
@@ -206,17 +204,40 @@ def download(data: Request):
     else:
         query = f"ytsearch1:{user_input}"
 
-    # If the folder doesn't exist yet, try creating it (helps deployments).
-    if not os.path.exists(save_path):
+    # Determine if we are streaming (Vercel) or saving (Local)
+    is_cloud = os.environ.get("VERCEL") or not data.save_path
+    
+    if is_cloud:
+        temp_dir = tempfile.mkdtemp()
         try:
-            os.makedirs(save_path, exist_ok=True)
-        except Exception:
-            from fastapi.responses import JSONResponse
-            return JSONResponse(status_code=400, content={"error": f"Invalid folder path: cannot create '{save_path}'"})
+            download_media(query, temp_dir, data.media_type, data.quality)
+            downloaded_files = os.listdir(temp_dir)
+            if not downloaded_files:
+                raise Exception("No file was downloaded.")
+            file_path = os.path.join(temp_dir, downloaded_files[0])
+            filename = downloaded_files[0]
+            def cleanup():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            background_tasks.add_task(cleanup)
+            return FileResponse(path=file_path, filename=filename, media_type='application/octet-stream')
+        except Exception as e:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return JSONResponse(status_code=500, content={"error": str(e)})
+    else:
+        # Local saving mode
+        save_path = os.path.expanduser(data.save_path)
+        if save_path.lower() == "downloads":
+            save_path = os.path.join(os.path.expanduser("~"), "Downloads")
+        save_path = os.path.abspath(save_path)
 
-    try:
-        download_media(query, save_path, data.media_type, data.quality)
-        return {"message": "Download completed!", "saved_to": save_path}
-    except Exception as e:
-        from fastapi.responses import JSONResponse
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        if not os.path.exists(save_path):
+            try:
+                os.makedirs(save_path, exist_ok=True)
+            except Exception:
+                return JSONResponse(status_code=400, content={"error": f"Invalid folder path: cannot create '{save_path}'"})
+
+        try:
+            download_media(query, save_path, data.media_type, data.quality)
+            return {"message": "Download completed!", "saved_to": save_path}
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": str(e)})

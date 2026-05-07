@@ -16,9 +16,9 @@ function App() {
   const [mode, setMode] = useState<'music' | 'youtube'>('music');
   const [quality, setQuality] = useState<string>('high');
 
-  // Hardcode to local backend to avoid Vite proxy networking issues, unless overridden
-  const apiBaseUrl = ((import.meta as any).env?.VITE_API_BASE_URL as string | undefined) || 'http://127.0.0.1:8000';
-  const apiBaseUrlNormalized = apiBaseUrl.replace(/\/$/, '');
+  // When deployed on Vercel, the API is hosted on the same domain at /api
+  // In development, we can hit the local server or the Vercel API
+  const apiBaseUrlNormalized = import.meta.env.PROD ? '' : 'http://127.0.0.1:8000';
 
   useEffect(() => {
     setIsVisible(true);
@@ -43,7 +43,7 @@ function App() {
 
   const handleFilePickerClick = async () => {
     try {
-      const response = await fetch(`${apiBaseUrlNormalized}/pick-folder`);
+      const response = await fetch(`${apiBaseUrlNormalized}/api/pick-folder`);
       if (response.ok) {
         const data = await response.json();
         if (data.folder) {
@@ -64,15 +64,14 @@ function App() {
       showToast('error', `Please enter a ${mode === 'music' ? 'song' : 'video'} URL or name`);
       return;
     }
-    if (!savePath.trim()) {
-      showToast('error', 'Please enter a server save folder path');
-      return;
-    }
+    
+    // savePath is optional in Cloud mode (Vercel), but recommended in Local mode
+    const isLocal = !!apiBaseUrlNormalized;
 
     setIsLoading(true);
 
     try {
-      const response = await fetch(`${apiBaseUrlNormalized}/download`, {
+      const response = await fetch(`${apiBaseUrlNormalized}/api/download`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -86,9 +85,25 @@ function App() {
       });
 
       if (response.ok) {
-        const data = await response.json();
-        const msg = data.saved_to ? `Saved successfully to ${data.saved_to}!` : 'Download completed successfully!';
-        showToast('success', msg);
+        // Check if the response is a file (Blob) or a JSON message
+        const contentType = response.headers.get('Content-Type');
+        if (contentType && contentType.includes('application/octet-stream')) {
+          const blob = await response.blob();
+          const filename = response.headers.get('Content-Disposition')?.split('filename=')[1]?.replace(/"/g, '') || 'download';
+          
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          window.URL.revokeObjectURL(url);
+          showToast('success', 'File downloaded successfully!');
+        } else {
+          const data = await response.json();
+          const msg = data.saved_to ? `Saved successfully to ${data.saved_to}!` : 'Download completed successfully!';
+          showToast('success', msg);
+        }
         setQuery('');
       } else {
         try {
