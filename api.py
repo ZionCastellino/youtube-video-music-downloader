@@ -17,6 +17,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from fastapi import Request, Response
+@app.middleware("http")
+async def add_pna_headers(request: Request, call_next):
+    if request.method == "OPTIONS":
+        response = Response()
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+        return response
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
+
 @app.get("/")
 def root():
     # If someone opens the FastAPI server root, take them to the download UI.
